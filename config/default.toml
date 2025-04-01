@@ -1,0 +1,9 @@
+[discord]
+# トークンは.envファイルから読み込みます
+# ここには何も設定しません
+channel_id = "1356621879888318554"
+
+
+[rss]
+feed_url = "https://b.hatena.ne.jp/t/ai?mode=rss"
+poll_interval_seconds = 300  # 5分ごとにチェック 
