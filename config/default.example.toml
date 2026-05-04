@@ -1,12 +1,10 @@
 [discord]
-# トークンは.envファイルから読み込みます
-# ここには何も設定しません
+# Token is loaded from .env.
 channel_id = "replace_me"
-
 
 [rss]
 feed_url = "https://b.hatena.ne.jp/t/ai?mode=rss"
-poll_interval_seconds = 300  # 5分ごとにチェック
+poll_interval_seconds = 300
 
 [state]
 file_path = "data/seen_items.json"
