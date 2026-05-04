@@ -26,14 +26,20 @@ cd discord_news_notify
 cargo build
 ```
 
-`.env_example`を`.env`にコピーし、Bot Tokenを設定します。
+Discord Developer PortalでBotを作成し、Bot Tokenを取得します。
+
+1. <https://discord.com/developers/applications> でApplicationを作成する。
+2. BotページでBotを作成し、Tokenを取得する。
+3. OAuth2 URL Generatorで`bot` scopeを選ぶ。
+4. Bot Permissionsで`Send Messages`を付け、投稿先サーバーへ招待する。
+
+`.env_example`を`.env`にコピーし、Bot Tokenを設定します。`.env`はgit管理対象外です。
 
 ```env
 DISCORD_BOT_TOKEN=replace_me
 ```
 
-`config/default.example.toml`を参考に、`config/default.toml`または`config/local.toml`を設定します。
-`config/local.toml`はgit管理対象外です。
+`config/default.example.toml`を参考に、`config/default.toml`または`config/local.toml`を設定します。個人設定を分けたい場合は`config/local.toml`を使ってください。`config/local.toml`はgit管理対象外です。
 
 ```toml
 [discord]
@@ -49,6 +55,8 @@ max_seen_items = 10000
 skip_existing_on_first_run = true
 ```
 
+`channel_id`はDiscordの開発者モードを有効にし、投稿先チャンネルを右クリックしてコピーします。
+
 ## 実行
 
 ```bash
@@ -56,6 +64,48 @@ cargo run
 ```
 
 終了するときは`Ctrl+C`を押します。
+
+ログを増やしたい場合は`RUST_LOG`を指定します。
+
+```bash
+RUST_LOG=info cargo run
+RUST_LOG=debug cargo run
+```
+
+## 初回起動と重複管理
+
+`skip_existing_on_first_run = true`の場合、初回起動時はRSS feed内の既存記事を投稿せず、既読状態として`data/seen_items.json`へ保存します。次回以降に見つかった新着記事だけを投稿します。
+
+`skip_existing_on_first_run = false`にすると、初回起動時から未読扱いの記事を投稿します。
+
+状態ファイルの保存先は`state.file_path`で変更できます。既定値は`data/seen_items.json`です。このファイルを削除すると既読状態が失われ、次回起動時は初回起動として扱われます。
+
+状態ファイルが壊れている場合、Botは起動時に停止します。復旧するにはファイル内容を修正するか、必要に応じて状態ファイルを削除してください。
+
+## 常時運用
+
+常時運用する場合は、作業ディレクトリをこのリポジトリに固定し、`.env`と設定ファイルを読める状態で`cargo run --release`またはビルド済みバイナリを起動してください。
+
+systemdやDockerの設定例はまだ同梱していません。Phase 9では運用方針の説明に留め、具体的なunit/Dockerfile追加はPhase 10の対象です。
+
+ログは標準出力/標準エラーに出ます。systemdで動かす場合は`journalctl`、Dockerで動かす場合は`docker logs`など、起動方法に合わせて確認してください。
+
+## トラブルシューティング
+
+- `token invalid`: `.env`の`DISCORD_BOT_TOKEN`が正しいか確認してください。Tokenを再発行した場合は`.env`も更新します。
+- `missing permissions`: Botに投稿先チャンネルで`Send Messages`権限があるか確認してください。
+- `channel not found`: `discord.channel_id`が投稿先チャンネルIDか、Botがそのサーバー/チャンネルへアクセスできるか確認してください。
+- `feed fetch failed`: `rss.feed_url`がHTTP/HTTPS URLか、RSS feedとして取得できるか確認してください。
+- `failed to parse state file`: 状態ファイルのJSONが壊れています。内容を修正するか、初回扱いに戻してよい場合は状態ファイルを削除してください。
+- `message too long`: 投稿本文はDiscordのcontent制限内に収める実装です。発生した場合はRSS本文やリンクが想定外に長くないか確認してください。
+- `rate limited`: Discord APIの制限です。通常は時間を置いて再試行されます。短すぎるポーリング間隔は避けてください。
+
+## セキュリティ注意
+
+- Bot Tokenをcommitしないでください。
+- `.env`は`.gitignore`に含まれています。
+- webhook URLは現在使っていません。将来導入する場合も公開リポジトリへcommitしないでください。
+- RSS由来の本文にはメンションが含まれる可能性があります。投稿時は`allowed_mentions`を空にし、本文中のメンション文字列も無効化しています。
 
 ## 実装メモ
 
