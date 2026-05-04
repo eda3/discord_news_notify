@@ -296,6 +296,94 @@ mod tests {
     }
 
     #[test]
+    fn count_zero_has_no_targets() {
+        let mut state = ArticleStateStore::load(test_path("count-zero"), 7).unwrap();
+        let id = state.upsert_rss_item(&rss_item("https://example.com/item"));
+        state.update_bookmark_count(&id, 0);
+
+        assert!(state.unposted_reached_thresholds(&id, &[1, 5, 20]).is_empty());
+    }
+
+    #[test]
+    fn count_one_targets_threshold_one() {
+        let mut state = ArticleStateStore::load(test_path("count-one"), 7).unwrap();
+        let id = state.upsert_rss_item(&rss_item("https://example.com/item"));
+        state.update_bookmark_count(&id, 1);
+
+        assert_eq!(state.unposted_reached_thresholds(&id, &[1, 5, 20]), vec![1]);
+    }
+
+    #[test]
+    fn count_four_after_threshold_one_posted_has_no_targets() {
+        let mut state = ArticleStateStore::load(test_path("count-four"), 7).unwrap();
+        let id = state.upsert_rss_item(&rss_item("https://example.com/item"));
+        state.update_bookmark_count(&id, 4);
+        state.mark_threshold_posted(&id, 1, Id::new(11));
+
+        assert!(state.unposted_reached_thresholds(&id, &[1, 5, 20]).is_empty());
+    }
+
+    #[test]
+    fn count_five_targets_threshold_one_and_five() {
+        let mut state = ArticleStateStore::load(test_path("count-five"), 7).unwrap();
+        let id = state.upsert_rss_item(&rss_item("https://example.com/item"));
+        state.update_bookmark_count(&id, 5);
+
+        assert_eq!(
+            state.unposted_reached_thresholds(&id, &[1, 5, 20]),
+            vec![1, 5]
+        );
+    }
+
+    #[test]
+    fn count_nineteen_after_one_and_five_posted_has_no_targets() {
+        let mut state = ArticleStateStore::load(test_path("count-nineteen"), 7).unwrap();
+        let id = state.upsert_rss_item(&rss_item("https://example.com/item"));
+        state.update_bookmark_count(&id, 19);
+        state.mark_threshold_posted(&id, 1, Id::new(11));
+        state.mark_threshold_posted(&id, 5, Id::new(55));
+
+        assert!(state.unposted_reached_thresholds(&id, &[1, 5, 20]).is_empty());
+    }
+
+    #[test]
+    fn count_twenty_targets_all_thresholds() {
+        let mut state = ArticleStateStore::load(test_path("count-twenty"), 7).unwrap();
+        let id = state.upsert_rss_item(&rss_item("https://example.com/item"));
+        state.update_bookmark_count(&id, 20);
+
+        assert_eq!(
+            state.unposted_reached_thresholds(&id, &[1, 5, 20]),
+            vec![1, 5, 20]
+        );
+    }
+
+    #[test]
+    fn count_twentyfive_with_one_posted_targets_five_and_twenty() {
+        let mut state = ArticleStateStore::load(test_path("count-25-one-posted"), 7).unwrap();
+        let id = state.upsert_rss_item(&rss_item("https://example.com/item"));
+        state.update_bookmark_count(&id, 25);
+        state.mark_threshold_posted(&id, 1, Id::new(11));
+
+        assert_eq!(
+            state.unposted_reached_thresholds(&id, &[1, 5, 20]),
+            vec![5, 20]
+        );
+    }
+
+    #[test]
+    fn count_twentyfive_all_posted_has_no_targets() {
+        let mut state = ArticleStateStore::load(test_path("count-25-all-posted"), 7).unwrap();
+        let id = state.upsert_rss_item(&rss_item("https://example.com/item"));
+        state.update_bookmark_count(&id, 25);
+        state.mark_threshold_posted(&id, 1, Id::new(11));
+        state.mark_threshold_posted(&id, 5, Id::new(55));
+        state.mark_threshold_posted(&id, 20, Id::new(2020));
+
+        assert!(state.unposted_reached_thresholds(&id, &[1, 5, 20]).is_empty());
+    }
+
+    #[test]
     fn posted_thresholds_are_not_returned_again() {
         let mut state = ArticleStateStore::load(test_path("posted"), 7).unwrap();
         let id = state.upsert_rss_item(&rss_item("https://example.com/item"));
