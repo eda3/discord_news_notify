@@ -56,6 +56,10 @@ fn fetch_items_blocking(feed_url: &str) -> Result<Vec<RssItem>> {
     let text = response.into_string()?;
     info!("RSS feed body loaded: {} bytes", text.len());
 
+    parse_items_from_text(&text)
+}
+
+fn parse_items_from_text(text: &str) -> Result<Vec<RssItem>> {
     let channel = Channel::read_from(BufReader::new(text.as_bytes()))?;
     let feed_title = channel.title().trim();
     info!(
@@ -126,7 +130,68 @@ pub fn item_id(item: &RssItem) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{RssItem, item_id, parse_pub_date};
+    use super::{RssItem, item_id, parse_items_from_text, parse_pub_date};
+
+    fn rss_with_item(item: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Example Feed</title>
+    {item}
+  </channel>
+</rss>"#
+        )
+    }
+
+    #[test]
+    fn parse_items_from_text_parses_valid_rss() {
+        let text = rss_with_item(
+            r#"<item>
+  <guid>guid-1</guid>
+  <title>Title</title>
+  <link>https://example.com/item</link>
+  <description>Description</description>
+  <pubDate>Mon, 04 May 2026 12:00:00 +0900</pubDate>
+</item>"#,
+        );
+
+        let items = parse_items_from_text(&text).unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].guid.as_deref(), Some("guid-1"));
+        assert_eq!(items[0].title, "Title");
+        assert_eq!(items[0].link, "https://example.com/item");
+        assert_eq!(items[0].description, "Description");
+        assert!(items[0].pub_date.is_some());
+        assert_eq!(items[0].feed_title.as_deref(), Some("Example Feed"));
+    }
+
+    #[test]
+    fn parse_items_from_text_handles_missing_item_fields() {
+        let text = rss_with_item("<item><guid>guid-1</guid></item>");
+
+        let items = parse_items_from_text(&text).unwrap();
+
+        assert_eq!(items[0].title, "No Title");
+        assert_eq!(items[0].link, "");
+        assert_eq!(items[0].description, "No description available");
+        assert!(items[0].pub_date.is_none());
+    }
+
+    #[test]
+    fn parse_items_from_text_handles_invalid_pub_date() {
+        let text = rss_with_item(
+            r#"<item>
+  <title>Title</title>
+  <pubDate>not a date</pubDate>
+</item>"#,
+        );
+
+        let items = parse_items_from_text(&text).unwrap();
+
+        assert!(items[0].pub_date.is_none());
+    }
 
     #[test]
     fn parse_pub_date_returns_none_for_invalid_date() {

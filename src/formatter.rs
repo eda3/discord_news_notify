@@ -153,4 +153,40 @@ mod tests {
         assert!(message.chars().count() <= DISCORD_CONTENT_LIMIT);
         assert!(message.contains("https://example.com/item"));
     }
+
+    #[test]
+    fn long_title_is_truncated() {
+        let item = RssItem {
+            guid: Some("guid-1".to_string()),
+            title: "title ".repeat(100),
+            link: "https://example.com/item".to_string(),
+            description: "Description".to_string(),
+            pub_date: None,
+            feed_title: Some("Example Feed".to_string()),
+        };
+
+        let message = format_item_message(&item);
+
+        assert!(message.contains("**Title:** "));
+        assert!(message.contains("..."));
+        assert!(!message.contains(&"title ".repeat(100)));
+    }
+
+    #[test]
+    fn empty_title_and_description_use_fallbacks() {
+        let item = RssItem {
+            guid: Some("guid-1".to_string()),
+            title: " ".to_string(),
+            link: String::new(),
+            description: " ".to_string(),
+            pub_date: None,
+            feed_title: None,
+        };
+
+        let message = format_item_message(&item);
+
+        assert!(message.contains("**Title:** No Title"));
+        assert!(message.contains("**Description:** No description available"));
+        assert!(message.contains("**Link:** No link"));
+    }
 }

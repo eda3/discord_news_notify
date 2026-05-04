@@ -78,13 +78,7 @@ impl Config {
         let mut config: Config = settings.try_deserialize()?;
 
         // 環境変数からトークンを取得
-        if let Ok(token) = env::var("DISCORD_BOT_TOKEN") {
-            config.discord.token = token;
-        } else {
-            return Err(anyhow::anyhow!(
-                "DISCORD_BOT_TOKEN environment variable not set"
-            ));
-        }
+        config.discord.token = discord_token_from_env(env::var("DISCORD_BOT_TOKEN").ok())?;
 
         config.validate()?;
 
@@ -109,6 +103,10 @@ impl Config {
 
         Ok(())
     }
+}
+
+fn discord_token_from_env(token: Option<String>) -> anyhow::Result<String> {
+    token.ok_or_else(|| anyhow::anyhow!("DISCORD_BOT_TOKEN environment variable not set"))
 }
 
 fn deserialize_channel_id<'de, D>(deserializer: D) -> Result<Id<ChannelMarker>, D::Error>
@@ -177,6 +175,20 @@ mod tests {
         config.discord.token = " ".to_string();
 
         let err = config.validate().unwrap_err().to_string();
+
+        assert!(err.contains("DISCORD_BOT_TOKEN"));
+    }
+
+    #[test]
+    fn discord_token_from_env_accepts_present_value() {
+        let token = discord_token_from_env(Some("token".to_string())).unwrap();
+
+        assert_eq!(token, "token");
+    }
+
+    #[test]
+    fn discord_token_from_env_rejects_missing_value() {
+        let err = discord_token_from_env(None).unwrap_err().to_string();
 
         assert!(err.contains("DISCORD_BOT_TOKEN"));
     }

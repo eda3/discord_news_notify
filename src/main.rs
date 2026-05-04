@@ -98,13 +98,16 @@ async fn check_rss_feed(
                 }
 
                 info!("New RSS item detected: {} ({})", item.title, item.link);
-                if let Err(e) = post_rss_item(http, config, &item).await {
+                if let Err(e) = mark_seen_if_posted(
+                    seen_state,
+                    item_id,
+                    post_rss_item(http, config, &item).await,
+                ) {
                     failed_count += 1;
                     error!("Error posting RSS item: {}", e);
                     continue;
                 }
 
-                seen_state.mark_seen(item_id);
                 posted_count += 1;
                 if let Err(e) = seen_state.save() {
                     warn!("RSS item was posted, but failed to save seen state: {}", e);
@@ -156,6 +159,16 @@ async fn post_rss_item(
     Ok(())
 }
 
+fn mark_seen_if_posted(
+    seen_state: &mut SeenState,
+    item_id: String,
+    post_result: Result<()>,
+) -> Result<()> {
+    post_result?;
+    seen_state.mark_seen(item_id);
+    Ok(())
+}
+
 fn classify_discord_error(error: &DiscordHttpError) -> &'static str {
     match error.kind() {
         ErrorType::Unauthorized => "token invalid",
@@ -170,5 +183,48 @@ fn classify_discord_error(error: &DiscordHttpError) -> &'static str {
             "network error"
         }
         _ => "unknown error",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mark_seen_if_posted;
+    use crate::state::SeenState;
+    use anyhow::anyhow;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_path(name: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        PathBuf::from(format!(
+            "target/test-main/{name}-{}-{now}.json",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn posted_item_is_marked_seen() {
+        let mut state = SeenState::load(test_path("posted"), 100).unwrap();
+
+        mark_seen_if_posted(&mut state, "item-1".to_string(), Ok(())).unwrap();
+
+        assert!(state.is_seen("item-1"));
+    }
+
+    #[test]
+    fn failed_post_is_not_marked_seen() {
+        let mut state = SeenState::load(test_path("failed"), 100).unwrap();
+
+        let result = mark_seen_if_posted(
+            &mut state,
+            "item-1".to_string(),
+            Err(anyhow!("post failed")),
+        );
+
+        assert!(result.is_err());
+        assert!(!state.is_seen("item-1"));
     }
 }

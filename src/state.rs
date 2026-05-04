@@ -128,10 +128,24 @@ pub fn default_state_path() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::SeenState;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_path(name: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        PathBuf::from(format!(
+            "target/test-state/{name}-{}-{now}.json",
+            std::process::id()
+        ))
+    }
 
     #[test]
     fn missing_state_file_is_first_run() {
-        let state = SeenState::load("target/test-state/missing.json", 100).unwrap();
+        let state = SeenState::load(test_path("missing"), 100).unwrap();
 
         assert!(state.is_first_run());
         assert!(!state.is_seen("item-1"));
@@ -139,7 +153,7 @@ mod tests {
 
     #[test]
     fn mark_seen_records_item() {
-        let mut state = SeenState::load("target/test-state/mark.json", 100).unwrap();
+        let mut state = SeenState::load(test_path("mark"), 100).unwrap();
 
         state.mark_seen("item-1".to_string());
 
@@ -148,7 +162,7 @@ mod tests {
 
     #[test]
     fn prune_keeps_newest_items() {
-        let mut state = SeenState::load("target/test-state/prune.json", 2).unwrap();
+        let mut state = SeenState::load(test_path("prune"), 2).unwrap();
 
         state.mark_seen("item-1".to_string());
         state.mark_seen("item-2".to_string());
@@ -157,5 +171,60 @@ mod tests {
         assert!(!state.is_seen("item-1"));
         assert!(state.is_seen("item-2"));
         assert!(state.is_seen("item-3"));
+    }
+
+    #[test]
+    fn empty_state_can_be_saved_and_reloaded() {
+        let path = test_path("empty-save");
+        let state = SeenState::load(&path, 100).unwrap();
+
+        state.save().unwrap();
+        let reloaded = SeenState::load(&path, 100).unwrap();
+
+        assert_eq!(reloaded.len(), 0);
+        assert!(!reloaded.is_first_run());
+    }
+
+    #[test]
+    fn saved_items_can_be_reloaded() {
+        let path = test_path("reload");
+        let mut state = SeenState::load(&path, 100).unwrap();
+        state.mark_seen("item-1".to_string());
+
+        state.save().unwrap();
+        let reloaded = SeenState::load(&path, 100).unwrap();
+
+        assert!(reloaded.is_seen("item-1"));
+    }
+
+    #[test]
+    fn corrupted_json_returns_error() {
+        let path = test_path("corrupt");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{not json").unwrap();
+
+        let err = match SeenState::load(&path, 100) {
+            Ok(_) => panic!("corrupted state file should fail to load"),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(err.contains("failed to parse state file"));
+    }
+
+    #[test]
+    fn saved_state_respects_max_items_after_pruning() {
+        let path = test_path("max-items");
+        let mut state = SeenState::load(&path, 2).unwrap();
+        state.mark_seen("item-1".to_string());
+        state.mark_seen("item-2".to_string());
+        state.mark_seen("item-3".to_string());
+
+        state.save().unwrap();
+        let reloaded = SeenState::load(&path, 2).unwrap();
+
+        assert_eq!(reloaded.len(), 2);
+        assert!(!reloaded.is_seen("item-1"));
+        assert!(reloaded.is_seen("item-2"));
+        assert!(reloaded.is_seen("item-3"));
     }
 }
