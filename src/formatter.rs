@@ -1,40 +1,34 @@
-use crate::rss::RssItem;
+use crate::state::ArticleSnapshot;
 
 pub const DISCORD_CONTENT_LIMIT: usize = 2000;
 
 const TITLE_LIMIT: usize = 200;
-const DESCRIPTION_LIMIT: usize = 1200;
-const FEED_TITLE_LIMIT: usize = 120;
 const LINK_LIMIT: usize = 500;
 const ELLIPSIS: &str = "...";
 
-pub fn format_item_message(item: &RssItem) -> String {
-    let title = clean_and_truncate(&item.title, TITLE_LIMIT, "No Title");
-    let description = clean_and_truncate(
-        &item.description,
-        DESCRIPTION_LIMIT,
-        "No description available",
-    );
-    let pub_date = item
-        .pub_date
-        .map(|date| date.to_rfc3339())
-        .unwrap_or_else(|| "Unknown".to_string());
-    let link = if item.link.trim().is_empty() {
+pub fn format_threshold_message(
+    article: &ArticleSnapshot,
+    threshold: u64,
+    bookmark_count: u64,
+) -> String {
+    let title = clean_and_truncate(&article.title, TITLE_LIMIT, "No Title");
+    let link = if article.url.trim().is_empty() {
         "No link".to_string()
     } else {
-        truncate(item.link.trim(), LINK_LIMIT)
+        truncate(article.url.trim(), LINK_LIMIT)
     };
-    let feed_title = item
-        .feed_title
-        .as_deref()
-        .map(|value| clean_and_truncate(value, FEED_TITLE_LIMIT, "Unknown feed"))
-        .unwrap_or_else(|| "Unknown feed".to_string());
+    let label = match threshold {
+        1 => "New Hatena Bookmark Item",
+        5 => "Hatena Bookmark Rising Item",
+        20 => "Hatena Bookmark Hot Item",
+        _ => "Hatena Bookmark Threshold Item",
+    };
 
     let content = format!(
-        "**New RSS Item**\n\n**Feed:** {feed_title}\n**Title:** {title}\n**Description:** {description}\n**Published:** {pub_date}\n**Link:** {link}",
+        "**{label}**\n\n**Threshold:** {threshold} bookmarks\n**Bookmarks:** {bookmark_count}\n**Title:** {title}\n**Link:** {link}",
     );
 
-    truncate_preserving_link(&content, &link)
+    truncate_preserving_threshold_link(&content, threshold, bookmark_count, &link)
 }
 
 fn clean_and_truncate(value: &str, limit: usize, fallback: &str) -> String {
@@ -86,107 +80,73 @@ fn truncate(value: &str, limit: usize) -> String {
     output
 }
 
-fn truncate_preserving_link(content: &str, link: &str) -> String {
+fn truncate_preserving_threshold_link(
+    content: &str,
+    threshold: u64,
+    bookmark_count: u64,
+    link: &str,
+) -> String {
     if content.chars().count() <= DISCORD_CONTENT_LIMIT {
         return content.to_string();
     }
 
-    let prefix = "**New RSS Item**\n\n**Description:** ";
+    let prefix = format!(
+        "**Hatena Bookmark Threshold Item**\n\n**Threshold:** {threshold} bookmarks\n**Bookmarks:** {bookmark_count}\n**Title:** "
+    );
     let suffix = format!("\n**Link:** {link}");
     let available = DISCORD_CONTENT_LIMIT
         .saturating_sub(prefix.chars().count())
         .saturating_sub(suffix.chars().count());
-    let description = truncate("Message was too long after formatting.", available);
+    let title = truncate("Title was too long after formatting.", available);
 
-    format!("{prefix}{description}{suffix}")
+    format!("{prefix}{title}{suffix}")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DISCORD_CONTENT_LIMIT, format_item_message};
-    use crate::rss::RssItem;
+    use super::{DISCORD_CONTENT_LIMIT, format_threshold_message};
+    use crate::state::ArticleSnapshot;
 
-    fn item_with_description(description: &str) -> RssItem {
-        RssItem {
-            guid: Some("guid-1".to_string()),
-            title: "Title".to_string(),
-            link: "https://example.com/item".to_string(),
-            description: description.to_string(),
-            pub_date: None,
-            feed_title: Some("Example Feed".to_string()),
+    fn article_with_title(title: &str) -> ArticleSnapshot {
+        ArticleSnapshot {
+            article_id: "article-1".to_string(),
+            title: title.to_string(),
+            url: "https://example.com/item".to_string(),
         }
     }
 
     #[test]
-    fn message_includes_expected_fields() {
-        let message = format_item_message(&item_with_description("Description"));
+    fn threshold_message_includes_threshold_count_and_link() {
+        let message = format_threshold_message(&article_with_title("Title"), 5, 12);
 
-        assert!(message.contains("**Feed:** Example Feed"));
+        assert!(message.contains("**Threshold:** 5 bookmarks"));
+        assert!(message.contains("**Bookmarks:** 12"));
         assert!(message.contains("**Title:** Title"));
-        assert!(message.contains("**Description:** Description"));
-        assert!(message.contains("**Published:** Unknown"));
         assert!(message.contains("**Link:** https://example.com/item"));
     }
 
     #[test]
-    fn message_strips_html_and_normalizes_whitespace() {
-        let message = format_item_message(&item_with_description("<p>Hello<br> world</p>"));
+    fn threshold_message_uses_threshold_specific_labels() {
+        let article = article_with_title("Title");
 
-        assert!(message.contains("Hello world"));
-        assert!(!message.contains("<p>"));
+        assert!(format_threshold_message(&article, 1, 1).contains("New Hatena Bookmark Item"));
+        assert!(format_threshold_message(&article, 5, 5).contains("Rising"));
+        assert!(format_threshold_message(&article, 20, 20).contains("Hot"));
     }
 
     #[test]
-    fn message_disables_mentions_in_content() {
-        let message = format_item_message(&item_with_description("@everyone @here <@123> <@&456>"));
+    fn threshold_message_disables_mentions() {
+        let message = format_threshold_message(&article_with_title("@everyone <@123>"), 1, 1);
 
         assert!(!message.contains("@everyone"));
-        assert!(!message.contains("@here"));
         assert!(!message.contains("<@123>"));
-        assert!(!message.contains("<@&456>"));
     }
 
     #[test]
-    fn long_message_stays_under_discord_limit_and_keeps_link() {
-        let message = format_item_message(&item_with_description(&"long ".repeat(1000)));
+    fn long_threshold_message_stays_under_limit_and_keeps_link() {
+        let message = format_threshold_message(&article_with_title(&"title ".repeat(1000)), 20, 25);
 
         assert!(message.chars().count() <= DISCORD_CONTENT_LIMIT);
         assert!(message.contains("https://example.com/item"));
-    }
-
-    #[test]
-    fn long_title_is_truncated() {
-        let item = RssItem {
-            guid: Some("guid-1".to_string()),
-            title: "title ".repeat(100),
-            link: "https://example.com/item".to_string(),
-            description: "Description".to_string(),
-            pub_date: None,
-            feed_title: Some("Example Feed".to_string()),
-        };
-
-        let message = format_item_message(&item);
-
-        assert!(message.contains("**Title:** "));
-        assert!(message.contains("..."));
-        assert!(!message.contains(&"title ".repeat(100)));
-    }
-
-    #[test]
-    fn empty_title_and_description_use_fallbacks() {
-        let item = RssItem {
-            guid: Some("guid-1".to_string()),
-            title: " ".to_string(),
-            link: String::new(),
-            description: " ".to_string(),
-            pub_date: None,
-            feed_title: None,
-        };
-
-        let message = format_item_message(&item);
-
-        assert!(message.contains("**Title:** No Title"));
-        assert!(message.contains("**Description:** No description available"));
-        assert!(message.contains("**Link:** No link"));
     }
 }

@@ -1,54 +1,80 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
+use twilight_model::id::Id;
+use twilight_model::id::marker::ChannelMarker;
+
+use crate::rss::{RssItem, item_id};
 
 #[derive(Debug, Serialize, Deserialize)]
-struct SeenStateFile {
-    seen_items: Vec<SeenItem>,
+struct ArticleStateFile {
+    articles: Vec<ArticleState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct SeenItem {
-    id: String,
-    seen_at: DateTime<Utc>,
+pub struct ArticleState {
+    pub article_id: String,
+    pub title: String,
+    pub url: String,
+    pub feed_title: Option<String>,
+    pub first_seen_at: DateTime<Utc>,
+    pub last_checked_at: Option<DateTime<Utc>>,
+    pub last_bookmark_count: Option<u64>,
+    pub posted_thresholds: Vec<u64>,
+    pub threshold_posts: BTreeMap<u64, ThresholdPostState>,
+    pub last_posted_at: Option<DateTime<Utc>>,
+    pub pub_date: Option<DateTime<Utc>>,
 }
 
-pub struct SeenState {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThresholdPostState {
+    pub channel_id: String,
+    pub posted_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArticleSnapshot {
+    pub article_id: String,
+    pub title: String,
+    pub url: String,
+}
+
+pub struct ArticleStateStore {
     path: PathBuf,
-    max_items: usize,
-    items: HashMap<String, DateTime<Utc>>,
+    retention_days: i64,
+    articles: HashMap<String, ArticleState>,
     first_run: bool,
 }
 
-impl SeenState {
-    pub fn load(path: impl Into<PathBuf>, max_items: usize) -> Result<Self> {
+impl ArticleStateStore {
+    pub fn load(path: impl Into<PathBuf>, retention_days: i64) -> Result<Self> {
         let path = path.into();
         if !path.exists() {
             return Ok(Self {
                 path,
-                max_items,
-                items: HashMap::new(),
+                retention_days,
+                articles: HashMap::new(),
                 first_run: true,
             });
         }
 
         let text = fs::read_to_string(&path)
             .with_context(|| format!("failed to read state file {}", path.display()))?;
-        let file: SeenStateFile = serde_json::from_str(&text)
+        let file: ArticleStateFile = serde_json::from_str(&text)
             .with_context(|| format!("failed to parse state file {}", path.display()))?;
-        let items = file
-            .seen_items
+        let articles = file
+            .articles
             .into_iter()
-            .map(|item| (item.id, item.seen_at))
+            .map(|article| (article.article_id.clone(), article))
             .collect();
 
         Ok(Self {
             path,
-            max_items,
-            items,
+            retention_days,
+            articles,
             first_run: false,
         })
     }
@@ -61,17 +87,118 @@ impl SeenState {
         self.first_run = false;
     }
 
-    pub fn is_seen(&self, id: &str) -> bool {
-        self.items.contains_key(id)
-    }
-
     pub fn len(&self) -> usize {
-        self.items.len()
+        self.articles.len()
     }
 
-    pub fn mark_seen(&mut self, id: String) {
-        self.items.insert(id, Utc::now());
-        self.prune();
+    pub fn upsert_rss_item(&mut self, item: &RssItem) -> String {
+        let article_id = item_id(item);
+        self.articles
+            .entry(article_id.clone())
+            .and_modify(|article| {
+                article.title = item.title.clone();
+                article.url = item.link.clone();
+                article.feed_title = item.feed_title.clone();
+                article.pub_date = item.pub_date;
+            })
+            .or_insert_with(|| ArticleState {
+                article_id: article_id.clone(),
+                title: item.title.clone(),
+                url: item.link.clone(),
+                feed_title: item.feed_title.clone(),
+                first_seen_at: Utc::now(),
+                last_checked_at: None,
+                last_bookmark_count: None,
+                posted_thresholds: Vec::new(),
+                threshold_posts: BTreeMap::new(),
+                last_posted_at: None,
+                pub_date: item.pub_date,
+            });
+
+        article_id
+    }
+
+    pub fn candidate_snapshots(&self) -> Vec<ArticleSnapshot> {
+        let mut snapshots = self
+            .articles
+            .values()
+            .map(|article| ArticleSnapshot {
+                article_id: article.article_id.clone(),
+                title: article.title.clone(),
+                url: article.url.clone(),
+            })
+            .collect::<Vec<_>>();
+        snapshots.sort_by(|a, b| a.article_id.cmp(&b.article_id));
+        snapshots
+    }
+
+    pub fn update_bookmark_count(&mut self, article_id: &str, count: u64) {
+        if let Some(article) = self.articles.get_mut(article_id) {
+            article.last_checked_at = Some(Utc::now());
+            article.last_bookmark_count = Some(count);
+        }
+    }
+
+    pub fn unposted_reached_thresholds(&self, article_id: &str, thresholds: &[u64]) -> Vec<u64> {
+        let Some(article) = self.articles.get(article_id) else {
+            return Vec::new();
+        };
+        let Some(count) = article.last_bookmark_count else {
+            return Vec::new();
+        };
+
+        thresholds
+            .iter()
+            .copied()
+            .filter(|threshold| count >= *threshold)
+            .filter(|threshold| !article.posted_thresholds.contains(threshold))
+            .collect()
+    }
+
+    pub fn mark_threshold_posted(
+        &mut self,
+        article_id: &str,
+        threshold: u64,
+        channel_id: Id<ChannelMarker>,
+    ) {
+        if let Some(article) = self.articles.get_mut(article_id) {
+            if !article.posted_thresholds.contains(&threshold) {
+                article.posted_thresholds.push(threshold);
+                article.posted_thresholds.sort_unstable();
+            }
+
+            let posted_at = Utc::now();
+            article.threshold_posts.insert(
+                threshold,
+                ThresholdPostState {
+                    channel_id: channel_id.get().to_string(),
+                    posted_at,
+                },
+            );
+            article.last_posted_at = Some(posted_at);
+        }
+    }
+
+    pub fn mark_reached_thresholds_posted(
+        &mut self,
+        article_id: &str,
+        thresholds: &[u64],
+        channels: &BTreeMap<u64, Id<ChannelMarker>>,
+    ) {
+        let reached = self.unposted_reached_thresholds(article_id, thresholds);
+        for threshold in reached {
+            if let Some(channel_id) = channels.get(&threshold) {
+                self.mark_threshold_posted(article_id, threshold, *channel_id);
+            }
+        }
+    }
+
+    pub fn prune(&mut self) {
+        let cutoff = Utc::now() - Duration::days(self.retention_days);
+        self.articles.retain(|_, article| {
+            let anchor = article.last_checked_at.unwrap_or(article.first_seen_at);
+            anchor >= cutoff
+        });
     }
 
     pub fn save(&self) -> Result<()> {
@@ -81,8 +208,8 @@ impl SeenState {
             })?;
         }
 
-        let file = SeenStateFile {
-            seen_items: self.sorted_items(),
+        let file = ArticleStateFile {
+            articles: self.sorted_articles(),
         };
         let text = serde_json::to_string_pretty(&file)?;
 
@@ -90,47 +217,31 @@ impl SeenState {
             .with_context(|| format!("failed to write state file {}", self.path.display()))
     }
 
-    fn prune(&mut self) {
-        if self.items.len() <= self.max_items {
-            return;
-        }
-
-        let keep_ids: Vec<String> = self
-            .sorted_items()
-            .into_iter()
-            .rev()
-            .take(self.max_items)
-            .map(|item| item.id)
-            .collect();
-
-        self.items.retain(|id, _| keep_ids.contains(id));
-    }
-
-    fn sorted_items(&self) -> Vec<SeenItem> {
-        let mut items: Vec<SeenItem> = self
-            .items
-            .iter()
-            .map(|(id, seen_at)| SeenItem {
-                id: id.clone(),
-                seen_at: *seen_at,
-            })
-            .collect();
-
-        items.sort_by(|a, b| a.seen_at.cmp(&b.seen_at).then_with(|| a.id.cmp(&b.id)));
-        items
+    fn sorted_articles(&self) -> Vec<ArticleState> {
+        let mut articles = self.articles.values().cloned().collect::<Vec<_>>();
+        articles.sort_by(|a, b| {
+            a.first_seen_at
+                .cmp(&b.first_seen_at)
+                .then_with(|| a.article_id.cmp(&b.article_id))
+        });
+        articles
     }
 }
 
 pub fn default_state_path() -> &'static str {
-    "data/seen_items.json"
+    "data/articles.json"
 }
 
 #[cfg(test)]
 mod tests {
-    use super::SeenState;
+    use super::{ArticleStateStore, ThresholdPostState};
+    use crate::rss::RssItem;
+    use chrono::{Duration, Utc};
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use twilight_model::id::Id;
 
     fn test_path(name: &str) -> PathBuf {
         let now = SystemTime::now()
@@ -143,58 +254,124 @@ mod tests {
         ))
     }
 
+    fn rss_item(link: &str) -> RssItem {
+        RssItem {
+            guid: Some(format!("guid-{link}")),
+            title: "Title".to_string(),
+            link: link.to_string(),
+            description: "Description".to_string(),
+            pub_date: None,
+            feed_title: Some("Feed".to_string()),
+        }
+    }
+
     #[test]
     fn missing_state_file_is_first_run() {
-        let state = SeenState::load(test_path("missing"), 100).unwrap();
+        let state = ArticleStateStore::load(test_path("missing"), 7).unwrap();
 
         assert!(state.is_first_run());
-        assert!(!state.is_seen("item-1"));
+        assert_eq!(state.len(), 0);
     }
 
     #[test]
-    fn mark_seen_records_item() {
-        let mut state = SeenState::load(test_path("mark"), 100).unwrap();
+    fn upsert_records_article() {
+        let mut state = ArticleStateStore::load(test_path("upsert"), 7).unwrap();
 
-        state.mark_seen("item-1".to_string());
+        let id = state.upsert_rss_item(&rss_item("https://example.com/item"));
 
-        assert!(state.is_seen("item-1"));
+        assert_eq!(state.len(), 1);
+        assert_eq!(state.candidate_snapshots()[0].article_id, id);
     }
 
     #[test]
-    fn prune_keeps_newest_items() {
-        let mut state = SeenState::load(test_path("prune"), 2).unwrap();
+    fn thresholds_use_greater_than_or_equal() {
+        let mut state = ArticleStateStore::load(test_path("thresholds"), 7).unwrap();
+        let id = state.upsert_rss_item(&rss_item("https://example.com/item"));
+        state.update_bookmark_count(&id, 25);
 
-        state.mark_seen("item-1".to_string());
-        state.mark_seen("item-2".to_string());
-        state.mark_seen("item-3".to_string());
-
-        assert!(!state.is_seen("item-1"));
-        assert!(state.is_seen("item-2"));
-        assert!(state.is_seen("item-3"));
+        assert_eq!(
+            state.unposted_reached_thresholds(&id, &[1, 5, 20]),
+            vec![1, 5, 20]
+        );
     }
 
     #[test]
-    fn empty_state_can_be_saved_and_reloaded() {
-        let path = test_path("empty-save");
-        let state = SeenState::load(&path, 100).unwrap();
+    fn posted_thresholds_are_not_returned_again() {
+        let mut state = ArticleStateStore::load(test_path("posted"), 7).unwrap();
+        let id = state.upsert_rss_item(&rss_item("https://example.com/item"));
+        state.update_bookmark_count(&id, 25);
+        state.mark_threshold_posted(&id, 1, Id::new(11));
+        state.mark_threshold_posted(&id, 5, Id::new(55));
 
+        assert_eq!(
+            state.unposted_reached_thresholds(&id, &[1, 5, 20]),
+            vec![20]
+        );
+    }
+
+    #[test]
+    fn partial_success_state_can_be_saved_and_reloaded() {
+        let path = test_path("partial");
+        let mut state = ArticleStateStore::load(&path, 7).unwrap();
+        let id = state.upsert_rss_item(&rss_item("https://example.com/item"));
+        state.update_bookmark_count(&id, 25);
+        state.mark_threshold_posted(&id, 1, Id::new(11));
+        state.mark_threshold_posted(&id, 20, Id::new(2020));
         state.save().unwrap();
-        let reloaded = SeenState::load(&path, 100).unwrap();
 
-        assert_eq!(reloaded.len(), 0);
-        assert!(!reloaded.is_first_run());
+        let reloaded = ArticleStateStore::load(&path, 7).unwrap();
+
+        assert_eq!(
+            reloaded.unposted_reached_thresholds(&id, &[1, 5, 20]),
+            vec![5]
+        );
     }
 
     #[test]
-    fn saved_items_can_be_reloaded() {
-        let path = test_path("reload");
-        let mut state = SeenState::load(&path, 100).unwrap();
-        state.mark_seen("item-1".to_string());
-
+    fn threshold_posts_are_persisted() {
+        let path = test_path("threshold-posts");
+        let mut state = ArticleStateStore::load(&path, 7).unwrap();
+        let id = state.upsert_rss_item(&rss_item("https://example.com/item"));
+        state.update_bookmark_count(&id, 5);
+        state.mark_threshold_posted(&id, 5, Id::new(55));
         state.save().unwrap();
-        let reloaded = SeenState::load(&path, 100).unwrap();
 
-        assert!(reloaded.is_seen("item-1"));
+        let text = fs::read_to_string(path).unwrap();
+
+        assert!(text.contains("\"posted_thresholds\""));
+        assert!(text.contains("\"5\""));
+        assert!(text.contains("\"channel_id\": \"55\""));
+    }
+
+    #[test]
+    fn mark_reached_thresholds_posted_uses_channel_map() {
+        let mut state = ArticleStateStore::load(test_path("initial-posted"), 7).unwrap();
+        let id = state.upsert_rss_item(&rss_item("https://example.com/item"));
+        state.update_bookmark_count(&id, 20);
+        let channels = BTreeMap::from([(1, Id::new(11)), (5, Id::new(55)), (20, Id::new(2020))]);
+
+        state.mark_reached_thresholds_posted(&id, &[1, 5, 20], &channels);
+
+        assert!(
+            state
+                .unposted_reached_thresholds(&id, &[1, 5, 20])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn prune_removes_old_candidates() {
+        let mut state = ArticleStateStore::load(test_path("prune"), 7).unwrap();
+        let old_id = state.upsert_rss_item(&rss_item("https://example.com/old"));
+        let new_id = state.upsert_rss_item(&rss_item("https://example.com/new"));
+        state.articles.get_mut(&old_id).unwrap().last_checked_at =
+            Some(Utc::now() - Duration::days(8));
+        state.articles.get_mut(&new_id).unwrap().last_checked_at = Some(Utc::now());
+
+        state.prune();
+
+        assert_eq!(state.len(), 1);
+        assert_eq!(state.candidate_snapshots()[0].article_id, new_id);
     }
 
     #[test]
@@ -203,7 +380,7 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "{not json").unwrap();
 
-        let err = match SeenState::load(&path, 100) {
+        let err = match ArticleStateStore::load(&path, 7) {
             Ok(_) => panic!("corrupted state file should fail to load"),
             Err(err) => err.to_string(),
         };
@@ -212,19 +389,25 @@ mod tests {
     }
 
     #[test]
-    fn saved_state_respects_max_items_after_pruning() {
-        let path = test_path("max-items");
-        let mut state = SeenState::load(&path, 2).unwrap();
-        state.mark_seen("item-1".to_string());
-        state.mark_seen("item-2".to_string());
-        state.mark_seen("item-3".to_string());
-
+    fn saved_empty_state_is_not_first_run() {
+        let path = test_path("empty");
+        let state = ArticleStateStore::load(&path, 7).unwrap();
         state.save().unwrap();
-        let reloaded = SeenState::load(&path, 2).unwrap();
 
-        assert_eq!(reloaded.len(), 2);
-        assert!(!reloaded.is_seen("item-1"));
-        assert!(reloaded.is_seen("item-2"));
-        assert!(reloaded.is_seen("item-3"));
+        let reloaded = ArticleStateStore::load(&path, 7).unwrap();
+
+        assert!(!reloaded.is_first_run());
+    }
+
+    #[test]
+    fn threshold_post_state_serializes_channel() {
+        let post = ThresholdPostState {
+            channel_id: "123".to_string(),
+            posted_at: Utc::now(),
+        };
+
+        let text = serde_json::to_string(&post).unwrap();
+
+        assert!(text.contains("123"));
     }
 }
